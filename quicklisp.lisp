@@ -123,6 +123,7 @@ e.g. :proxy-url and :initial-dist-url.")
   (setf *quickstart-parameters*
         (list :proxy-url proxy-url
               :initial-dist-url dist-url))
+  (ensure-directories-exist (qmerge "setup.lisp"))
   (format t "~&; Installing Quicklisp to ~A~%" *home*)
   (format t "~&;   Copying setup.lisp~%")
   (copy-file (merge-pathnames "setup.lisp" repo-root)

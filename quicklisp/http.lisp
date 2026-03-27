@@ -808,6 +808,14 @@ the indexes in the header accordingly."
         (apply call (urlstring url) file rest)
         (error "Unknown scheme ~S" url))))
 
+(defun find-executable (name)
+  "Return NAME if it is found on PATH, else NIL."
+  (let ((checker #+windows "where" #-windows "which"))
+    (ignore-errors
+      (uiop:run-program (list checker name)
+                        :output nil :error-output nil)
+      name)))
+
 (defun parse-wget-status (stderr)
   "Extract the last HTTP status code from wget --server-response stderr output."
   (let ((pos (search "HTTP/" stderr :from-end t)))
@@ -827,7 +835,9 @@ Uses the FETCHER environment variable if set, then tries curl, then wget."
   (setf file (merge-pathnames file))
   ;; Upgrade plain http to https
   (when (string= (scheme url) "http")
-    (setf (scheme url) "https"))
+    (setf (scheme url) "https")
+    (unless quietly
+      (format *trace-output* "~&; Upgraded URL scheme from http to https~%")))
   (let* ((urlstr (urlstring url))
          (filestr (namestring file))
          (out (if quietly (make-broadcast-stream) *trace-output*))
@@ -836,6 +846,7 @@ Uses the FETCHER environment variable if set, then tries curl, then wget."
     (format out "~&; Fetching ~A~%" urlstr)
     (cond
       (fetcher
+       (format out "~&; Using FETCHER program: ~A~%" fetcher)
        (multiple-value-bind (stdout stderr exit-code)
            (uiop:run-program (list fetcher urlstr filestr)
                              :output :string :error-output :string
@@ -843,7 +854,8 @@ Uses the FETCHER environment variable if set, then tries curl, then wget."
          (declare (ignore stdout stderr))
          (unless (zerop exit-code)
            (error 'unexpected-http-status :url urlstr :status-code exit-code))))
-      ((uiop:find-program-in-path "curl")
+      ((find-executable "curl")
+       (format out "~&; Using curl to fetch~%")
        (multiple-value-bind (http-status stderr exit-code)
            (uiop:run-program (list "curl" "-L" "--max-redirs" max-redirs
                                    "--fail" "-s" "-w" "%{http_code}"
@@ -862,7 +874,8 @@ Uses the FETCHER environment variable if set, then tries curl, then wget."
                                        (string-trim '(#\Space #\Newline #\Return)
                                                     http-status)))
                                     exit-code))))))
-      ((uiop:find-program-in-path "wget")
+      ((find-executable "wget")
+       (format out "~&; Using wget to fetch~%")
        (multiple-value-bind (stdout stderr exit-code)
            (uiop:run-program (list "wget" "--max-redirect" max-redirs
                                    "--server-response" "-q"
