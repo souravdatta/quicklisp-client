@@ -796,7 +796,8 @@ the indexes in the header accordingly."
              (too-many-redirects-url condition)))))
 
 (defvar *fetch-scheme-functions*
-  '(("http" . http-fetch))
+  '(("http" . https-fetch)
+    ("https" . https-fetch))
   "assoc list to decide which scheme-function are called by FETCH function.")
 
 (defun fetch (url file &rest rest)
@@ -807,56 +808,32 @@ the indexes in the header accordingly."
         (apply call (urlstring url) file rest)
         (error "Unknown scheme ~S" url))))
 
-(defun http-fetch (url file &key (follow-redirects t) quietly
-              (if-exists :rename-and-delete)
-              (maximum-redirects *maximum-redirects*))
-  "default scheme-function for http protocol."
+(defun https-fetch (url file &key quietly
+              (if-exists :rename-and-delete))
+  "Fetch URL via HTTPS and save to FILE. Upgrades http:// to https://.
+Uses the FETCHER environment variable if set, then tries curl, then wget."
   (setf url (merge-urls url *default-url-defaults*))
   (setf file (merge-pathnames file))
-  (let ((redirect-count 0)
-        (original-url url)
-        (connect-url (or (url *proxy-url*) url))
-        (stream (if quietly
-                    (make-broadcast-stream)
-                    *trace-output*)))
-    (loop
-     (when (<= maximum-redirects redirect-count)
-       (error 'too-many-redirects
-              :url original-url
-              :redirect-count redirect-count))
-     (with-connection (connection (hostname connect-url) (or (port connect-url) 80))
-       (let ((cbuf (make-instance 'cbuf :connection connection))
-             (request (request-buffer "GET" url)))
-         (write-octets request connection)
-         (let ((header (read-http-header cbuf)))
-           (loop while (= (status header) 100)
-                 do (setf header (read-http-header cbuf)))
-           (cond ((= (status header) 200)
-                  (let ((size (content-length header)))
-                    (format stream "~&; Fetching ~A~%" url)
-                    (if (and (numberp size)
-                             (plusp size))
-                        (format stream "; ~$KB~%" (/ size 1024))
-                        (format stream "; Unknown size~%"))
-                    (if quietly
-                        (save-response file header cbuf
-                                       :if-exists if-exists)
-                        (call-with-progress-bar
-                         (content-length header)
-                         (lambda ()
-                           (save-response file header cbuf
-                                          :if-exists if-exists))))))
-                 ((not (<= 300 (status header) 399))
-                  (error 'unexpected-http-status
-                         :url url
-                         :status-code (status header))))
-           (if (and follow-redirects (<= 300 (status header) 399))
-               (let ((new-urlstring (ascii-header-value "location" header)))
-                 (unless new-urlstring
-                   (error "Redirect code ~D received, but no Location: header"
-                          (status header)))
-                 (incf redirect-count)
-                 (setf url (merge-urls new-urlstring
-                                       url))
-                 (format stream "~&; Redirecting to ~A~%" url))
-               (return (values header (and file (probe-file file)))))))))))
+  ;; Upgrade plain http to https
+  (when (string= (scheme url) "http")
+    (setf (scheme url) "https"))
+  (let* ((urlstr (urlstring url))
+         (filestr (namestring file))
+         (out (if quietly (make-broadcast-stream) *trace-output*))
+         (fetcher (uiop:getenv "FETCHER")))
+    (format out "~&; Fetching ~A~%" urlstr)
+    (cond
+      (fetcher
+       (uiop:run-program (list fetcher urlstr filestr)
+                         :output out :error-output out))
+      ((uiop:find-program-in-path "curl")
+       (uiop:run-program (list "curl" "-L" "-s" "-o" filestr urlstr)
+                         :output out :error-output out))
+      ((uiop:find-program-in-path "wget")
+       (uiop:run-program (list "wget" "-q" "-O" filestr urlstr)
+                         :output out :error-output out))
+      (t
+       (error "No HTTPS fetcher found. ~
+               Please set the FETCHER environment variable ~
+               to a download tool (e.g. curl or wget).")))
+    (probe-file file))))
