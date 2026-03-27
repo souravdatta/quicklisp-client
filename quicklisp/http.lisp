@@ -808,10 +808,21 @@ the indexes in the header accordingly."
         (apply call (urlstring url) file rest)
         (error "Unknown scheme ~S" url))))
 
+(defun parse-wget-status (stderr)
+  "Extract the last HTTP status code from wget --server-response stderr output."
+  (let ((pos (search "HTTP/" stderr :from-end t)))
+    (when pos
+      (let* ((space1 (position #\Space stderr :start pos))
+             (code-start (and space1 (1+ space1)))
+             (code-end (and code-start (position #\Space stderr :start code-start))))
+        (when (and code-start code-end)
+          (ignore-errors (parse-integer (subseq stderr code-start code-end))))))))
+
 (defun https-fetch (url file &key quietly
               (if-exists :rename-and-delete))
   "Fetch URL via HTTPS and save to FILE. Upgrades http:// to https://.
 Uses the FETCHER environment variable if set, then tries curl, then wget."
+  (declare (ignore if-exists))
   (setf url (merge-urls url *default-url-defaults*))
   (setf file (merge-pathnames file))
   ;; Upgrade plain http to https
@@ -820,20 +831,54 @@ Uses the FETCHER environment variable if set, then tries curl, then wget."
   (let* ((urlstr (urlstring url))
          (filestr (namestring file))
          (out (if quietly (make-broadcast-stream) *trace-output*))
-         (fetcher (uiop:getenv "FETCHER")))
+         (fetcher (uiop:getenv "FETCHER"))
+         (max-redirs (princ-to-string *maximum-redirects*)))
     (format out "~&; Fetching ~A~%" urlstr)
     (cond
       (fetcher
-       (uiop:run-program (list fetcher urlstr filestr)
-                         :output out :error-output out))
+       (multiple-value-bind (stdout stderr exit-code)
+           (uiop:run-program (list fetcher urlstr filestr)
+                             :output :string :error-output :string
+                             :ignore-error-status t)
+         (declare (ignore stdout stderr))
+         (unless (zerop exit-code)
+           (error 'unexpected-http-status :url urlstr :status-code exit-code))))
       ((uiop:find-program-in-path "curl")
-       (uiop:run-program (list "curl" "-L" "-s" "-o" filestr urlstr)
-                         :output out :error-output out))
+       (multiple-value-bind (http-status stderr exit-code)
+           (uiop:run-program (list "curl" "-L" "--max-redirs" max-redirs
+                                   "--fail" "-s" "-w" "%{http_code}"
+                                   "-o" filestr urlstr)
+                             :output :string :error-output :string
+                             :ignore-error-status t)
+         (declare (ignore stderr))
+         (cond
+           ((= exit-code 47)
+            (error 'too-many-redirects
+                   :url urlstr :redirect-count *maximum-redirects*))
+           ((not (zerop exit-code))
+            (error 'unexpected-http-status :url urlstr
+                   :status-code (or (ignore-errors
+                                      (parse-integer
+                                       (string-trim '(#\Space #\Newline #\Return)
+                                                    http-status)))
+                                    exit-code))))))
       ((uiop:find-program-in-path "wget")
-       (uiop:run-program (list "wget" "-q" "-O" filestr urlstr)
-                         :output out :error-output out))
+       (multiple-value-bind (stdout stderr exit-code)
+           (uiop:run-program (list "wget" "--max-redirect" max-redirs
+                                   "--server-response" "-q"
+                                   "-O" filestr urlstr)
+                             :output :string :error-output :string
+                             :ignore-error-status t)
+         (declare (ignore stdout))
+         (unless (zerop exit-code)
+           (if (search "redirections" stderr)
+               (error 'too-many-redirects
+                      :url urlstr :redirect-count *maximum-redirects*)
+               (error 'unexpected-http-status :url urlstr
+                      :status-code (or (parse-wget-status stderr)
+                                       exit-code))))))
       (t
        (error "No HTTPS fetcher found. ~
                Please set the FETCHER environment variable ~
                to a download tool (e.g. curl or wget).")))
-    (probe-file file))))
+    (probe-file file)))
