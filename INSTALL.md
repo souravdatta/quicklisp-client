@@ -175,3 +175,7 @@ delete `~/quicklisp/` and run `install` again, or call:
 ```lisp
 (ql:update-client)
 ```
+
+## Support
+
+soura.jagat@gmail.com
